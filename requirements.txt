@@ -1,0 +1,9 @@
+fastapi
+uvicorn[standard]
+pydantic
+python-dotenv
+supabase
+httpx
+clerk-sdk
+email-validator
+python-jose[cryptography]
