@@ -44,7 +44,7 @@ class Settings:
     # Add the URL for the external hotel service.
     # We use os.getenv to make it configurable in the .env file,
     # but provide a default placeholder IP as requested.
-    HOTEL_SERVICE_URL: str = os.getenv("HOTEL_SERVICE_URL", "http://127.0.0.1:8001")
+    HOTEL_SERVICE_URL: str = os.getenv("HOTEL_SERVICE_URL", "http://10.163.3.1:8082/")
     # --- END NEW ---
 
     # Bandaranaike International Airport (Katunayake)

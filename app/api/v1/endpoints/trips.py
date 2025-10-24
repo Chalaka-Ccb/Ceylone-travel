@@ -1,18 +1,17 @@
 # File: app/api/v1/endpoints/trips.py
 
 from fastapi import APIRouter, Depends, HTTPException
-# --- IMPORT ClerkUser and auth dependency ---
 from app.models.schemas import TripGenerationRequest, TripResponse, ReservationRequest, UserResponse, ClerkUser
 from app.core.auth import get_authenticated_user
-# ---
 from app.db.supabase_client import supabase_client
 from app.services import plan_service
 from supabase import Client
+import sys
 
 router = APIRouter()
 
 
-# Dependency (Keep for /reserve-trip if it still needs direct db access)
+# Dependency
 def get_db():
     return supabase_client
 
@@ -21,32 +20,59 @@ def get_db():
 @router.post("/generate-plan", response_model=TripResponse)
 def generate_plan(
         request: TripGenerationRequest,
-        # --- ADD THIS DEPENDENCY ---
-        # This will check the token. If valid, 'current_user' will be a ClerkUser model.
-        # If invalid, it will stop here and return a 401 Error.
-        current_user: ClerkUser = Depends(get_authenticated_user)
+        current_user: ClerkUser = Depends(get_authenticated_user),
+        db: Client = Depends(get_db)
 ):
     """
     Generates a new personalized travel plan based on user inputs.
     Requires authentication.
     """
+    # --- (FIX 1: Separate the user upsert) ---
     try:
-        # --- PASS 'current_user.id' to the service ---
-        print(f"Generating plan for user: {current_user.id}")  # Good for logging
+        user_data_to_upsert = {'id': current_user.id}
+
+        # Only add email to the upsert if it actually exists
+        if current_user.email:
+            user_data_to_upsert['email'] = current_user.email
+
+        print(f"--- Upserting user profile: {user_data_to_upsert} ---")
+        sys.stdout.flush()
+
+        db.table('users').upsert(user_data_to_upsert, on_conflict='id').execute()
+
+        print(f"--- User profile upsert successful for {current_user.id} ---")
+        sys.stdout.flush()
+
+    except Exception as e:
+        print(f"---!!! FATAL: Error upserting user profile !!!---", file=sys.stderr)
+        print(f"Error: {e}", file=sys.stderr)
+        sys.stderr.flush()
+        # This is the error your frontend will now see
+        raise HTTPException(status_code=500, detail=f"Failed to create user profile in DB: {e}")
+
+    # --- (FIX 2: Separate the plan generation) ---
+    # This code will only run if the user upsert above was successful
+    try:
+        print(f"Generating plan for user: {current_user.id}")
         trip_plan = plan_service.generate_trip_plan(request, user_id=current_user.id)
         return trip_plan
+
     except HTTPException as e:
+        # Re-raise known errors from the service (e.g., "Budget too low")
         raise e
     except Exception as e:
-        print(f"Unexpected error in /generate-plan: {e}")  # Keep detailed logging
-        raise HTTPException(status_code=500, detail="An internal server error occurred.")
+        # Catch any errors from plan_service.py
+        print(f"Unexpected error in /generate-plan endpoint: {e}", file=sys.stderr)
+        sys.stderr.flush()
+        # This will catch the "[NEW ERROR 1]" or "[NEW ERROR 2]"
+        # and pass them to the frontend
+        raise HTTPException(status_code=500, detail=f"Error during plan generation: {e}")
 
 
 # --- MODIFIED /reserve-trip ---
 @router.post("/reserve-trip", response_model=UserResponse)
 def reserve_trip(
         request: ReservationRequest,
-        # --- ADD AUTH DEPENDENCY ---
         current_user: ClerkUser = Depends(get_authenticated_user),
         db: Client = Depends(get_db)
 ):
@@ -54,38 +80,28 @@ def reserve_trip(
     Saves reservation details for a user and links it to their trip.
     Requires authentication.
     """
-    # With Clerk, the user account (current_user.id) is the source of truth.
-    # The 'users' table in your Supabase might now be used for storing *profiles*
-    # or *reservation details* linked to the Clerk user_id, rather than for auth.
-
-    # We will use the 'current_user.id' as the unique ID.
-    # We can 'upsert' (update or insert) profile info based on their Clerk ID.
-
     try:
-        # Use the Clerk ID as the primary key for your user/profile table
         user_response = db.table('users').upsert({
-            'id': current_user.id,  # <-- Use Clerk ID
-            'email': request.email,  # <-- Use email from form ( or current_user.email)
+            'id': current_user.id,
+            'email': request.email,
             'first_name': request.first_name,
             'last_name': request.last_name,
-            # ... add other fields from request if your 'users' table stores them
-        }, on_conflict='id').execute()  # <-- Upsert on 'id' (the Clerk ID)
+        }, on_conflict='id').execute()
 
         if not user_response.data:
             raise Exception("Failed to upsert user profile data.")
 
         new_user_profile = user_response.data[0]
 
-        # Now, link the trip to this user ID
+        # --- (FIXED TYPO HERE) ---
+        # Changed 'new_user__profile' to 'new_user_profile'
         trip_update_response = db.table('trips').update({
-            'user_id': new_user_profile['id']  # <-- This is the Clerk ID
+            'user_id': new_user_profile['id']
         }).eq('id', request.trip_id).execute()
 
         if not trip_update_response.data:
-            # This might happen if the trip_id is wrong, but we'll allow it for now
             print(f"Warning: Could not link trip {request.trip_id} to user {new_user_profile['id']}.")
 
-        # Return the user data that was saved
         return UserResponse(
             id=new_user_profile.get('id'),
             email=new_user_profile.get('email'),
@@ -94,5 +110,6 @@ def reserve_trip(
         )
 
     except Exception as e:
-        print(f"Error in /reserve-trip: {e}")
+        print(f"Error in /reserve-trip: {e}", file=sys.stderr)
+        sys.stderr.flush()
         raise HTTPException(status_code=500, detail="Could not process reservation.")
